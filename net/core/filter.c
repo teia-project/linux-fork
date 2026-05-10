@@ -8128,6 +8128,30 @@ sock_addr_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 }
 
 static const struct bpf_func_proto *
+cg_syscall_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
+{
+	const struct bpf_func_proto *func_proto;
+
+	func_proto = cgroup_common_func_proto(func_id, prog);
+	if (func_proto)
+		return func_proto;
+
+	func_proto = cgroup_current_func_proto(func_id, prog);
+	if (func_proto)
+		return func_proto;
+
+	switch (func_id) {
+	case BPF_FUNC_get_current_uid_gid:
+		return &bpf_get_current_uid_gid_proto;
+	case BPF_FUNC_probe_write_user:
+		return security_locked_down(LOCKDOWN_BPF_WRITE_USER) < 0 ?
+			NULL : &bpf_probe_write_user_proto;
+	default:
+		return bpf_base_func_proto(func_id, prog);
+	}
+}
+
+static const struct bpf_func_proto *
 sk_filter_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
 	switch (func_id) {
@@ -9284,6 +9308,15 @@ static bool sock_addr_is_valid_access(int off, int size,
 	return true;
 }
 
+static bool cg_syscall_is_valid_access(int off, int size,
+	enum bpf_access_type type,
+	const struct bpf_prog *prog,
+	struct bpf_insn_access_aux *info)
+{	
+	// TODO: Implementation
+	return true;
+}
+
 static bool sock_ops_is_valid_access(int off, int size,
 				     enum bpf_access_type type,
 				     const struct bpf_prog *prog,
@@ -10394,6 +10427,96 @@ static u32 sock_addr_convert_ctx_access(enum bpf_access_type type,
 	return insn - insn_buf;
 }
 
+#define CG_SYSCALL_LOAD(S, F, KS, KF) \
+	do { \
+		if (access_type == BPF_READ) { \
+			*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(KS, KF),  \
+						si->dst_reg, si->src_reg,  \
+						offsetof(KS, KF)); \
+			*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(S, F), \
+						si->dst_reg, si->dst_reg, \
+						0); \
+		} \
+	} while(0) 
+
+#define CG_SYSCALL_LOAD_OR_STORE(S, F, KS, KF, OFF) \
+	do { \
+		if (access_type == BPF_READ) { \
+			*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(KS, KF),  \
+						si->dst_reg, si->src_reg,  \
+						offsetof(KS, KF)); \
+			*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(S, F), \
+						si->dst_reg, si->dst_reg, \
+						OFF); \
+		} else if (access_type == BPF_WRITE) { \
+			int scratch_reg = BPF_REG_9; \
+			if (si->src_reg == scratch_reg || si->dst_reg == scratch_reg) \
+				scratch_reg--; \
+			if (si->src_reg == scratch_reg || si->dst_reg == scratch_reg) \
+				scratch_reg--; \
+			*insn++ = BPF_STX_MEM(BPF_DW, si->dst_reg, scratch_reg, \
+						offsetof(KS, tmp_reg)); \
+			*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(KS, KF),  \
+						scratch_reg, si->dst_reg, \
+						offsetof(KS, KF)); \
+			*insn++ = BPF_STX_MEM(BPF_FIELD_SIZEOF(S, F), \
+						scratch_reg, si->src_reg, OFF); \
+			*insn++ = BPF_LDX_MEM(BPF_DW, scratch_reg, si->dst_reg, \
+						offsetof(KS, tmp_reg)); \
+		} \
+	} while(0) 
+
+
+#define CG_SYSCALL_FIELD_RW_ACCESS(name, F, KF) \
+	case offsetof(struct bpf_cg_syscall_##name, F): \
+		CG_SYSCALL_LOAD_OR_STORE(struct bpf_cg_syscall_##name, F, \
+			struct bpf_cg_syscall_##name##_kern, KF, 0); \
+		break;
+
+#define CG_SYSCALL_FIELD_RO_ACCESS(name, F, KF) \
+	case offsetof(struct bpf_cg_syscall_##name, F): \
+		CG_SYSCALL_LOAD(struct bpf_cg_syscall_##name, F, \
+			struct bpf_cg_syscall_##name##_kern, KF); \
+		break;
+
+static u32 cg_syscall_convert_ctx_access(enum bpf_access_type access_type,
+				       const struct bpf_insn *si,
+				       struct bpf_insn *insn_buf,
+				       struct bpf_prog *prog,
+				       u32 *target_size)
+{
+	struct bpf_insn *insn = insn_buf;
+
+	switch (prog->expected_attach_type) {
+		case BPF_CGROUP_SYSCALL_EXIT:
+		case BPF_CGROUP_SYSCALL_ENTER:
+			switch (si->off) {
+				// todo(oli): this could definitely be less faff (i.e. less switching)
+				CG_SYSCALL_FIELD_RW_ACCESS(enter, nr, nr);
+				CG_SYSCALL_FIELD_RW_ACCESS(enter, arg0, arg0);
+				CG_SYSCALL_FIELD_RW_ACCESS(enter, arg1, arg1);
+				CG_SYSCALL_FIELD_RW_ACCESS(enter, arg2, arg2);
+				CG_SYSCALL_FIELD_RW_ACCESS(enter, arg3, arg3);
+				CG_SYSCALL_FIELD_RW_ACCESS(enter, arg4, arg4);
+				CG_SYSCALL_FIELD_RW_ACCESS(enter, arg5, arg5);
+				CG_SYSCALL_FIELD_RW_ACCESS(enter, ret, ret);
+				CG_SYSCALL_FIELD_RW_ACCESS(enter, resolve_ptr_regs, resolve_ptr_regs);
+				case bpf_ctx_range_till(struct bpf_cg_syscall_enter, scratch[0], scratch[4095]):
+						int off = si->off;
+						off -= offsetof(struct bpf_cg_syscall_enter, scratch[0]);
+						CG_SYSCALL_LOAD_OR_STORE(struct bpf_cg_syscall_enter, 
+								scratch[0], struct bpf_cg_syscall_enter_kern, scratch, off);
+						break;
+			}
+			break;
+		default:
+			break;
+	}
+
+	return insn - insn_buf;
+}
+
+
 static u32 sock_ops_convert_ctx_access(enum bpf_access_type type,
 				       const struct bpf_insn *si,
 				       struct bpf_insn *insn_buf,
@@ -11171,6 +11294,15 @@ const struct bpf_verifier_ops cg_sock_addr_verifier_ops = {
 };
 
 const struct bpf_prog_ops cg_sock_addr_prog_ops = {
+};
+
+const struct bpf_verifier_ops cg_syscall_verifier_ops = {
+	.get_func_proto     = cg_syscall_func_proto,
+	.is_valid_access    = cg_syscall_is_valid_access,
+	.convert_ctx_access = cg_syscall_convert_ctx_access,
+};
+
+const struct bpf_prog_ops cg_syscall_prog_ops = {
 };
 
 const struct bpf_verifier_ops sock_ops_verifier_ops = {

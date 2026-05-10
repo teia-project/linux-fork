@@ -123,6 +123,16 @@ long strncpy_from_user(char *dst, const char __user *src, long count)
 	kasan_check_write(dst, count);
 	check_object_size(dst, count, false);
 
+        if (kuser_access_ok(src, count)) {
+                for (long i = 0; i < count; ++i) {
+                        dst[i] = src[i];
+                        if (!src[i]) {
+                                return i;
+                        }
+                }
+                return count;
+        }
+
 	if (can_do_masked_user_access()) {
 		long retval;
 

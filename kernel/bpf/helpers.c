@@ -255,6 +255,40 @@ const struct bpf_func_proto bpf_get_current_uid_gid_proto = {
 	.ret_type	= RET_INTEGER,
 };
 
+BPF_CALL_3(bpf_probe_write_user, void __user *, unsafe_ptr, const void *, src,
+	u32, size)
+{
+	/*
+	* Ensure we're in user context which is safe for the helper to
+	* run. This helper has no business in a kthread.
+	*
+	* access_ok() should prevent writing to non-user memory, but in
+	* some situations (nommu, temporary switch, etc) access_ok() does
+	* not provide enough validation, hence the check on KERNEL_DS.
+	*
+	* nmi_uaccess_okay() ensures the probe is not run in an interim
+	* state, when the task or mm are switched. This is specifically
+	* required to prevent the use of temporary mm.
+	*/
+
+	if (unlikely(in_interrupt() ||
+			current->flags & (PF_KTHREAD | PF_EXITING)))
+		return -EPERM;
+	if (unlikely(!nmi_uaccess_okay()))
+		return -EPERM;
+
+	return copy_to_user_nofault(unsafe_ptr, src, size);
+}
+
+const struct bpf_func_proto bpf_probe_write_user_proto = {
+	.func		= bpf_probe_write_user,
+	.gpl_only	= true,
+	.ret_type	= RET_INTEGER,
+	.arg1_type	= ARG_ANYTHING,
+	.arg2_type	= ARG_PTR_TO_MEM | MEM_RDONLY,
+	.arg3_type	= ARG_CONST_SIZE,
+};
+
 BPF_CALL_2(bpf_get_current_comm, char *, buf, u32, size)
 {
 	struct task_struct *task = current;

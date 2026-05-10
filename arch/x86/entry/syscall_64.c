@@ -4,9 +4,13 @@
 #include <linux/linkage.h>
 #include <linux/sys.h>
 #include <linux/cache.h>
+#include <linux/bpf-cgroup.h>
 #include <linux/syscalls.h>
 #include <linux/entry-common.h>
 #include <linux/nospec.h>
+#include <linux/mm.h>
+#include <linux/mman.h>
+#include <linux/gfp.h>
 #include <asm/syscall.h>
 
 #define __SYSCALL(nr, sym) extern long __x64_##sym(const struct pt_regs *);
@@ -58,12 +62,36 @@ static __always_inline bool do_syscall_x64(struct pt_regs *regs, int nr)
 	 */
 	unsigned int unr = nr;
 
+	bool ret = false;
+
+	int bpf_ret = 0;
+	__u8 resolve_ptr_regs = 0; 
+	char scratch[4096];
+	
+	if (cgroup_bpf_enabled(CGROUP_SYSCALL_ENTER)) {
+		current->kuser_space_start = (unsigned long)&scratch[0];
+		current->kuser_space_end = current->kuser_space_start + 4096;
+		bpf_ret = __cgroup_bpf_run_filter_syscall_enter(regs, &nr, &resolve_ptr_regs);  
+	}
+
+	// this means return early 
+	// if ((bpf_ret & 2) != 0) {
+	//         return false;
+	// } 
+	
 	if (likely(unr < NR_syscalls)) {
 		unr = array_index_nospec(unr, NR_syscalls);
 		regs->ax = x64_sys_call(regs, unr);
-		return true;
+		ret = true;
 	}
-	return false;
+
+	current->kuser_space_start = 0;
+	current->kuser_space_end = 0;
+	if (cgroup_bpf_enabled(CGROUP_SYSCALL_EXIT)) {
+		__cgroup_bpf_run_filter_syscall_exit(regs, &nr, &resolve_ptr_regs);
+	}
+
+	return ret;
 }
 
 static __always_inline bool do_syscall_x32(struct pt_regs *regs, int nr)

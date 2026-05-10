@@ -1058,6 +1058,7 @@ enum bpf_prog_type {
 	BPF_PROG_TYPE_SK_LOOKUP,
 	BPF_PROG_TYPE_SYSCALL, /* a program that can execute syscalls */
 	BPF_PROG_TYPE_NETFILTER,
+	BPF_PROG_TYPE_CGROUP_SYSCALL,
 	__MAX_BPF_PROG_TYPE
 };
 
@@ -1120,6 +1121,8 @@ enum bpf_attach_type {
 	BPF_NETKIT_PEER,
 	BPF_TRACE_KPROBE_SESSION,
 	BPF_TRACE_UPROBE_SESSION,
+	BPF_CGROUP_SYSCALL_ENTER,
+	BPF_CGROUP_SYSCALL_EXIT,
 	__MAX_BPF_ATTACH_TYPE
 };
 
@@ -6783,6 +6786,23 @@ struct bpf_sock_addr {
 				 * Stored in network byte order.
 				 */
 	__bpf_md_ptr(struct bpf_sock *, sk);
+};
+
+struct bpf_cg_syscall_enter {
+	unsigned int nr;
+	// these are the syscall arguments, e.g. in x64 this would be
+	// rdi, rsi, rdx, r10, r8, r9, rax.
+	unsigned long arg0, arg1, arg2, arg3, arg4, arg5, ret;
+	// Linux has at most 7 arg registers + 2 return registers. (we just have
+	// one ret register). Set the nth bit to 1 to resolve the offset into
+	// scratch stored in this register to be a true pointer
+	__u8 resolve_ptr_regs;
+        __u8 _padding[7];
+	// 4096 bytes of (protected) scratch memory exposed to the ebpf program
+	// we have to convert offsets into this scratch to actual pointers
+	// after we return control to the kernel, to do this we use
+	// `resolve_ptr_regs`.
+	char scratch[4096];
 };
 
 /* User bpf_sock_ops struct to access socket values and specify request ops

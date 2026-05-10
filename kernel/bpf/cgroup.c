@@ -2047,6 +2047,83 @@ int __cgroup_bpf_run_filter_getsockopt_kern(struct sock *sk, int level,
 }
 #endif
 
+static int __cgroup_bpf_run_filter_syscall_generic(
+        enum cgroup_bpf_attach_type atype,
+        struct pt_regs *regs, 
+        unsigned int *nr, 
+        __u8 *resolve_ptr_regs
+) {
+        unsigned long kuser_space_start = current->kuser_space_start;
+
+	struct bpf_cg_syscall_enter_kern ctx = {
+		.nr = nr,
+                #ifdef CONFIG_X86_64
+                        .arg0 = &regs->di,
+                        .arg1 = &regs->si,
+                        .arg2 = &regs->dx,
+                        .arg3 = &regs->r10,
+                        .arg4 = &regs->r8,
+                        .arg5 = &regs->r9,
+                        .ret = &regs->ax,
+                #else
+                        #error unsupported arch for EPS
+                #endif
+                .scratch = (char *)kuser_space_start,
+                .resolve_ptr_regs = resolve_ptr_regs,
+	};
+	int ret;
+
+	rcu_read_lock();
+	struct cgroup *cgrp = task_dfl_cgroup(current);
+	ret = bpf_prog_run_array_cg(&cgrp->bpf, atype, &ctx, 
+		bpf_prog_run, 0, NULL);
+	rcu_read_unlock();
+
+        // fix up the registers that contain kernel pointers
+        // we check that the region is valid _
+        #define RESOLVE_PTR_REG(REG_INDEX, REG_IDENT)                      \
+                if (((*resolve_ptr_regs) & ((__u8)1 << REG_INDEX)) != 0) { \
+                        *ctx.REG_IDENT += kuser_space_start;               \
+                }
+        RESOLVE_PTR_REG(0, arg0)
+        RESOLVE_PTR_REG(1, arg1)
+        RESOLVE_PTR_REG(2, arg2)
+        RESOLVE_PTR_REG(3, arg3)
+        RESOLVE_PTR_REG(4, arg4)
+        RESOLVE_PTR_REG(5, arg5)
+        RESOLVE_PTR_REG(6, ret)
+
+        return ret;
+}
+
+int __cgroup_bpf_run_filter_syscall_enter(
+        struct pt_regs *regs, 
+        unsigned int *nr, 
+        __u8 *resolve_ptr_regs
+) {
+        return __cgroup_bpf_run_filter_syscall_generic(
+                CGROUP_SYSCALL_ENTER,
+                regs, 
+                nr,
+                resolve_ptr_regs
+        );
+}
+EXPORT_SYMBOL(__cgroup_bpf_run_filter_syscall_enter);
+
+int __cgroup_bpf_run_filter_syscall_exit(
+        struct pt_regs *regs, 
+        unsigned int *nr,
+        __u8 *resolve_ptr_regs
+) {
+        return __cgroup_bpf_run_filter_syscall_generic(
+                CGROUP_SYSCALL_EXIT,
+                regs, 
+                nr,
+                resolve_ptr_regs
+        );
+}
+EXPORT_SYMBOL(__cgroup_bpf_run_filter_syscall_exit);
+
 static ssize_t sysctl_cpy_dir(const struct ctl_dir *dir, char **bufp,
 			      size_t *lenp)
 {
