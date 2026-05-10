@@ -10338,9 +10338,6 @@ static u32 xdp_convert_ctx_access(enum bpf_access_type type,
 		}							       \
 	} while (0)
 
-
-
-
 static u32 sock_addr_convert_ctx_access(enum bpf_access_type type,
 					const struct bpf_insn *si,
 					struct bpf_insn *insn_buf,

@@ -43,7 +43,8 @@ CGROUP COMMANDS
 |     **cgroup_udp6_sendmsg** | **cgroup_unix_sendmsg** |
 |     **cgroup_udp4_recvmsg** | **cgroup_udp6_recvmsg** |
 |     **cgroup_unix_recvmsg** | **cgroup_sysctl** |
-|     **cgroup_getsockopt** | **cgroup_setsockopt** }
+|     **cgroup_getsockopt** | **cgroup_setsockopt** |
+|     **cgroup_inet_sock_release** }
 | *ATTACH_FLAGS* := { **multi** | **override** }
 
 DESCRIPTION
