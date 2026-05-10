@@ -2049,7 +2049,6 @@ int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)
 
 	if (fd_empty(f))
 		return -EBADF;
-
 	ret = move_addr_to_kernel(uservaddr, addrlen, &address);
 	if (ret)
 		return ret;
@@ -2173,6 +2172,7 @@ int __sys_sendto(int fd, void __user *buff, size_t len, unsigned int flags,
 		msg.msg_name = (struct sockaddr *)&address;
 		msg.msg_namelen = addr_len;
 	}
+
 	flags &= ~MSG_INTERNAL_SENDMSG_FLAGS;
 	if (sock->file->f_flags & O_NONBLOCK)
 		flags |= MSG_DONTWAIT;

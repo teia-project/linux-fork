@@ -4,9 +4,13 @@
 #include <linux/linkage.h>
 #include <linux/sys.h>
 #include <linux/cache.h>
+#include <linux/bpf-cgroup.h>
 #include <linux/syscalls.h>
 #include <linux/entry-common.h>
 #include <linux/nospec.h>
+#include <linux/mm.h>
+#include <linux/mman.h>
+#include <linux/gfp.h>
 #include <asm/syscall.h>
 
 #define __SYSCALL(nr, sym) extern long __x64_##sym(const struct pt_regs *);
@@ -50,6 +54,123 @@ long x32_sys_call(const struct pt_regs *regs, unsigned int nr)
 }
 #endif
 
+// /// eBPF programs can access through kernel virtual memory
+// /// syscalls take userland pointers
+// /// thus we do a read-only mapping to the page in userland
+// /// and a read/write mapping in kernel space
+// /// and tada! we avoid tocttou
+// /// Yes, unsigned long is used as a pointer in the kernel -- forget provenance!
+// /// Since we're mmaping something, we might OOM -- so we just kill the calling
+// /// process
+// static int mmap_eps_scratch(unsigned long *kptr_out, struct page **page, unsigned long *uptr_out)
+// {       
+//         // todo(oli): leaks on some ooms
+//         *page = alloc_page(GFP_KERNEL);
+//         if (*page == NULL) return -1; // oom
+//         void *kptr = page_address(*page); 
+        
+//         // this is just mmap()
+//         unsigned long uptr = vm_mmap(
+//                 NULL, 
+//                 0,
+//                 PAGE_SIZE,
+//                 PROT_NONE,
+//                 MAP_PRIVATE | MAP_ANONYMOUS,
+//                 0
+//         ); 
+//         if (IS_ERR_VALUE(uptr)) return -1; // oom
+        
+//         struct mm_struct *mm = current->mm;
+//         if (mm == NULL) {
+//                 return -1;
+//         }
+//         mmap_write_lock(mm);
+//         struct vm_area_struct *vma = find_vma(mm, uptr);
+//         // we have to check this > addr thing technically since someone could've
+//         // munmapped in the meantime
+//         if (vma == NULL || vma->vm_start > uptr) {
+//                 // oom
+//                 mmap_write_unlock(mm);
+//                 return -1; 
+//         }
+//         // we need to turn off this 'maywrite' thing so the user can't call
+//         // mprotect
+//         vm_flags_clear(vma, VM_MAYWRITE);
+//         if (vm_insert_page(vma, uptr, *page) < 0) {
+//                 // oom
+//                 mmap_write_unlock(mm);
+//                 return -1; 
+//         }
+//         mmap_write_unlock(mm);
+
+//         *kptr_out = (unsigned long)kptr;
+//         *uptr_out = uptr;
+
+//         return 0;
+// }
+
+// static void munmap_eps_scratch(unsigned long kptr, struct page *page, unsigned long uptr)
+// {
+//         put_page(page); 
+//         struct mm_struct *mm = current->mm;
+//         mmap_write_lock(mm);
+//         do_munmap(mm, uptr, PAGE_SIZE, NULL);
+//         mmap_write_unlock(mm);
+// }
+
+// static __always_inline bool do_syscall_x64(struct pt_regs *regs, int nr)
+// {
+// 	/*
+// 	 * Convert negative numbers to very high and thus out of range
+// 	 * numbers for comparisons.
+// 	 */
+// 	unsigned int unr = nr;
+        
+//         // EPS entry
+//         struct page *page; 
+//         unsigned long kscratch, uscratch;
+//         __u8 resolve_ptr_regs = 0; 
+//         if (cgroup_bpf_enabled(CGROUP_SYSCALL_ENTER)) {	               
+//                 if (mmap_eps_scratch(&kscratch, &page, &uscratch) < 0) {
+//                         do_exit(SIGKILL);
+//                 } 
+//                 __cgroup_bpf_run_filter_syscall_enter(regs, &nr, &resolve_ptr_regs, kscratch, uscratch);  
+//         }
+
+//         bool ret = false;
+// 	if (likely(unr < NR_syscalls)) {
+// 		unr = array_index_nospec(unr, NR_syscalls);
+// 		regs->ax = x64_sys_call(regs, unr);
+// 		ret = true;
+// 	}
+
+//         // munmap the scratch
+//         if (kscratch) {
+//                 munmap_eps_scratch(kscratch, page, uscratch);
+//         }
+
+// 	return ret;
+// }
+
+// cache for which syscalls have active eps hooks, eps programmers can disable
+// // these to speed things up, 511th bit is reserved 
+// static __u64 eps_hooks[6] = {
+//         (1ul << 39) | (1ul << 55), // 39 (pid), 55 (getsockopt)
+//         (1ul << 33),               // 96 (timeofday)
+//         0,                         
+//         (1ul << 1),                // 257 (openat)
+//         0,
+//         0
+// };
+
+// static bool eps_hook_is_active(unsigned int unr)
+// {
+//         unsigned int idx = unr >> 6; // word index
+//         unsigned int off = unr & 63; // bit offset
+//         __u64 w = __atomic_load_n(&eps_hooks[idx], __ATOMIC_RELAXED);
+//         return (w >> off) & 1;
+// }
+
 static __always_inline bool do_syscall_x64(struct pt_regs *regs, int nr)
 {
 	/*
@@ -58,13 +179,51 @@ static __always_inline bool do_syscall_x64(struct pt_regs *regs, int nr)
 	 */
 	unsigned int unr = nr;
 
-	if (likely(unr < NR_syscalls)) {
-		unr = array_index_nospec(unr, NR_syscalls);
-		regs->ax = x64_sys_call(regs, unr);
-		return true;
-	}
-	return false;
+        // // fast path using cached bit
+        // if (!eps_hook_is_active(nr)) {
+        //         if (likely(unr < NR_syscalls)) {
+        //                 unr = array_index_nospec(unr, NR_syscalls);
+        //                 regs->ax = x64_sys_call(regs, unr);
+        //                 return true;
+        //         }
+        //         return false;
+        // }
+
+        bool ret = false;
+        // bool repeat = true;
+        // while (repeat) {
+                int bpf_ret = 0;
+                __u8 resolve_ptr_regs = 0; 
+                char scratch[4096];
+                
+                if (cgroup_bpf_enabled(CGROUP_SYSCALL_ENTER)) {
+                        current->kuser_space_start = (unsigned long)&scratch[0];
+                        current->kuser_space_end = current->kuser_space_start + 4096;
+                        bpf_ret = __cgroup_bpf_run_filter_syscall_enter(regs, &nr, &resolve_ptr_regs);  
+                }
+
+                // // this means return early 
+                // if ((bpf_ret & 2) != 0) {
+                //         return false;
+                // } 
+                
+                if (likely(unr < NR_syscalls)) {
+                        unr = array_index_nospec(unr, NR_syscalls);
+                        regs->ax = x64_sys_call(regs, unr);
+                        ret = true;
+                }
+        
+                current->kuser_space_start = 0;
+                current->kuser_space_end = 0;
+                if (cgroup_bpf_enabled(CGROUP_SYSCALL_EXIT)) {
+                        __cgroup_bpf_run_filter_syscall_exit(regs, &nr, &resolve_ptr_regs);
+                }
+
+        // } 
+
+	return ret;
 }
+
 
 static __always_inline bool do_syscall_x32(struct pt_regs *regs, int nr)
 {

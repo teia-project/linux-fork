@@ -1875,7 +1875,7 @@ static int netlink_sendmsg(struct socket *sock, struct msghdr *msg, size_t len)
 		kfree_skb(skb);
 		goto out;
 	}
-
+	
 	if (dst_group) {
 		refcount_inc(&skb->users);
 		netlink_broadcast(sk, skb, dst_portid, dst_group, GFP_KERNEL);

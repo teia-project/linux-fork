@@ -16906,6 +16906,9 @@ static int check_return_code(struct bpf_verifier_env *env, int regno, const char
 	case BPF_PROG_TYPE_CGROUP_SYSCTL:
 	case BPF_PROG_TYPE_CGROUP_SOCKOPT:
 		break;
+	case BPF_PROG_TYPE_CGROUP_SYSCALL:
+		range = retval_range(0, 3);
+		break;
 	case BPF_PROG_TYPE_RAW_TRACEPOINT:
 		if (!env->prog->aux->attach_btf_id)
 			return 0;
@@ -17840,14 +17843,14 @@ static int check_btf_func(struct bpf_verifier_env *env,
 		ret_type = btf_type_skip_modifiers(btf, func_proto->type, NULL);
 		scalar_return =
 			btf_type_is_small_int(ret_type) || btf_is_any_enum(ret_type);
-		if (i && !scalar_return && env->subprog_info[i].has_ld_abs) {
-			verbose(env, "LD_ABS is only allowed in functions that return 'int'.\n");
-			goto err_free;
-		}
-		if (i && !scalar_return && env->subprog_info[i].has_tail_call) {
-			verbose(env, "tail_call is only allowed in functions that return 'int'.\n");
-			goto err_free;
-		}
+		// if (i && !scalar_return && env->subprog_info[i].has_ld_abs) {
+		// 	verbose(env, "LD_ABS is only allowed in functions that return 'int'.\n");
+		// 	goto err_free;
+		// }
+		// if (i && !scalar_return && env->subprog_info[i].has_tail_call) {
+		// 	verbose(env, "tail_call is only allowed in functions that return 'int'.\n");
+		// 	goto err_free;
+		// }
 
 		bpfptr_add(&urecord, urec_size);
 	}

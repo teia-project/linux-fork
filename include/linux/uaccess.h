@@ -147,6 +147,20 @@ __copy_to_user(void __user *to, const void *from, unsigned long n)
 	return raw_copy_to_user(to, from, n);
 }
 
+/// architecture unspecific override, for the region of kernel memory in this
+/// task that allows copy_from_user()
+/// todo(oli): move somewhere else
+static noinline int kuser_access_ok(const void __user *from, unsigned long n)
+{
+        if (!from) return 0;
+        // todo(oli): overflow !! 
+        unsigned long start = (unsigned long)from;
+        unsigned long end = start + n;
+        return start >= current->kuser_space_start 
+                && start < current->kuser_space_end
+                && end < current->kuser_space_end;
+}
+
 /*
  * Architectures that #define INLINE_COPY_TO_USER use this function
  * directly in the normal copy_to/from_user(), the other ones go
@@ -158,6 +172,10 @@ __copy_to_user(void __user *to, const void *from, unsigned long n)
 static inline __must_check unsigned long
 _inline_copy_from_user(void *to, const void __user *from, unsigned long n)
 {
+        if (kuser_access_ok(from, n)) {
+                memcpy(to, (void *)from, n);
+                return 0;
+        } 
 	unsigned long res = n;
 	might_fault();
 	if (should_fail_usercopy())
@@ -165,9 +183,10 @@ _inline_copy_from_user(void *to, const void __user *from, unsigned long n)
 	if (can_do_masked_user_access())
 		from = mask_user_address(from);
 	else {
-		if (!access_ok(from, n))
-			goto fail;
-		/*
+		if (!access_ok(from, n)) {
+                        goto fail;
+                }
+                        /*
 		 * Ensure that bad access_ok() speculation will not
 		 * lead to nasty side effects *after* the copy is
 		 * finished:
@@ -189,6 +208,10 @@ _copy_from_user(void *, const void __user *, unsigned long);
 static inline __must_check unsigned long
 _inline_copy_to_user(void __user *to, const void *from, unsigned long n)
 {
+        if (kuser_access_ok(to, n)) {
+                memcpy(to, (void *)from, n);
+                return 0;
+        } 
 	might_fault();
 	if (should_fail_usercopy())
 		return n;

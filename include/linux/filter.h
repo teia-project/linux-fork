@@ -1516,6 +1516,18 @@ struct bpf_sock_addr_kern {
 	u32 uaddrlen;
 };
 
+struct bpf_cg_syscall_enter_kern {
+	unsigned int *nr;
+	unsigned long *arg0, *arg1, *arg2, *arg3, *arg4, *arg5, *ret;
+        __u8 *resolve_ptr_regs;
+        char *scratch;
+	/* Temporary "register" to make indirect stores to fields defined above.
+	 * We need three registers to make such a store, but only two (src and dst) 
+	 * are available at convert_ctx_access time
+	 */
+	u64 tmp_reg;
+};
+
 struct bpf_sock_ops_kern {
 	struct	sock *sk;
 	union {
